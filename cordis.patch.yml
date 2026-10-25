@@ -1,0 +1,4 @@
+- insert:
+    - id: book-library
+      name: 'dsh-book-library'
+      config: {}

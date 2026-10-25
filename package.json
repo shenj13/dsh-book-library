@@ -1,0 +1,63 @@
+{
+  "name": "dsh-book-library",
+  "version": "1.28.5",
+  "type": "module",
+  "description": "DSH 左侧栏书库：导入 EPUB/TXT/Markdown 自动切章，逐章五段式讲解（概括/美句/作者表达/AI 观点/需要补充点），豆包语音按情节换语气念出来，原文段落同步高亮，边听边问，导出单页 HTML。",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "borrower.js",
+    "tts.js",
+    "tutor.js",
+    "cordis.patch.yml",
+    "icon.svg",
+    "locale/*.json",
+    "README.md",
+    "LICENSE",
+    "textkit.js"
+  ],
+  "icon": "./icon.svg",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-sidebar"
+      ]
+    }
+  },
+  "peerDependencies": {
+    "react": "^18.2.0"
+  },
+  "license": "MIT",
+  "author": "DSH Book Library contributors",
+  "engines": {
+    "dsh": ">=0.2.0-rc.2"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "dsh",
+    "reading",
+    "ebook",
+    "epub",
+    "tts",
+    "ai-tutor",
+    "reader"
+  ],
+  "homepage": "https://awesome-dsh-plugin.com",
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  }
+}
