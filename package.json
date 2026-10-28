@@ -1,6 +1,6 @@
 {
   "name": "dsh-book-library",
-  "version": "1.28.5",
+  "version": "1.29.3",
   "type": "module",
   "description": "DSH 左侧栏书库：导入 EPUB/TXT/Markdown 自动切章，逐章五段式讲解（概括/美句/作者表达/AI 观点/需要补充点），豆包语音按情节换语气念出来，原文段落同步高亮，边听边问，导出单页 HTML。",
   "exports": {

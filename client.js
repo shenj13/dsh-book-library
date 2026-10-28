@@ -23,6 +23,8 @@ window.__ModuleLoader__.load({
     const VOICE_API = '/dsh-book-library/voice';
     const PROBE_API = '/dsh-book-library/voice/probe';
     const CONSULT_API = '/dsh-book-library/consult';
+    const CONSULT_HISTORY_API = '/dsh-book-library/consult/history';
+    const CONSULT_EXPORT_API = '/dsh-book-library/consult/export';
     const RENAME_API = '/dsh-book-library/rename';
     const DELETE_API = '/dsh-book-library/delete';
     const LECTURE_API = '/dsh-book-library/lecture';
@@ -246,8 +248,10 @@ window.__ModuleLoader__.load({
       ' padding: 0 1px; border-radius: 3px; }' +
       '.bl-anchor:hover { background: var(--dsw-alias-bg-layer-2); }' +
       '.bl-seg { transition: background .25s ease; }' +
-      '.bl-seg.bl-hot { background: rgba(74, 108, 247, 0.16);' +
+      '.bl-seg.bl-hot { background: rgba(74, 108, 247, 0.22);' +
       ' box-shadow: inset 3px 0 0 var(--dsw-alias-brand-primary); }' +
+      '.bl-seg.bl-active { background: rgba(74, 108, 247, 0.4);' +
+      ' box-shadow: inset 5px 0 0 var(--dsw-alias-brand-primary); }' +
       '.bl-lecture::-webkit-scrollbar, .bl-textbox::-webkit-scrollbar { width: 8px; }' +
       '.bl-lecture::-webkit-scrollbar-thumb, .bl-textbox::-webkit-scrollbar-thumb {' +
       ' background: var(--dsw-alias-border-l2); border-radius: 4px; }' +
@@ -1538,7 +1542,10 @@ window.__ModuleLoader__.load({
                             }
                           }, 80);
                         },
-                        className: 'bl-seg' + (seg.n === activeSeg ? ' bl-hot' : ''),
+                        className:
+                          'bl-seg' +
+                          (seg.n && hotSegs.has(seg.n) ? ' bl-hot' : '') +
+                          (seg.n === activeSeg ? ' bl-active' : ''),
                         style: {
                           margin: '0 0 18px',
                           padding: '5px 11px',
@@ -1780,8 +1787,12 @@ window.__ModuleLoader__.load({
       const [text, setText] = useState('');
       const [items, setItems] = useState([]);
       const [busy, setBusy] = useState(false);
+      const [tip, setTip] = useState('');
       const seqRef = useRef(0);
       const ctrlRef = useRef(null);
+      const listRef = useRef(null);
+      const storeRef = useRef({});
+      const bookIdRef = useRef(bookId);
 
       useEffect(() => {
         if (!bookId && list.length) setBookId(list[0].id);
@@ -1803,6 +1814,114 @@ window.__ModuleLoader__.load({
       useEffect(() => {
         itemsRef.current = items;
       }, [items]);
+
+      useEffect(() => {
+        if (bookId) storeRef.current[bookId] = items;
+      }, [bookId, items]);
+
+      useEffect(() => {
+        bookIdRef.current = bookId;
+      }, [bookId]);
+
+      /** 翻回某本书时把它存过的问答捞出来（内存里没有再问后端）。 */
+      const loadHistory = useCallback(async (id) => {
+        if (!id || (storeRef.current[id] || []).length) return;
+        try {
+          const r = await fetch(CONSULT_HISTORY_API + '?bookId=' + encodeURIComponent(id));
+          const data = await r.json();
+          if (!data || !data.ok || !Array.isArray(data.items) || !data.items.length) return;
+          if ((storeRef.current[id] || []).length) return;
+          const hist = data.items.map((it, i) => ({
+            seq: 'h' + i,
+            q: it.q,
+            a: it.a,
+            status: 'done',
+            error: '',
+            at: it.at,
+          }));
+          storeRef.current[id] = hist;
+          if (bookIdRef.current === id) setItems(hist);
+        } catch {
+          /* 取不到历史就当新的一本，不打扰 */
+        }
+      }, []);
+
+      useEffect(() => {
+        if (bookId) loadHistory(bookId);
+      }, [bookId, loadHistory]);
+
+      const switchBook = useCallback(
+        (id) => {
+          if (!id || id === bookId) return;
+          storeRef.current[bookId] = items;
+          setBookId(id);
+          setItems(storeRef.current[id] || []);
+        },
+        [bookId, items],
+      );
+
+      /** 把当前这本书的问答拼成纯文本，复制到剪贴板。 */
+      const copyAll = useCallback(async () => {
+        const done = items.filter((it) => it.a);
+        if (!done.length) {
+          setTip('还没有问答可复制');
+          return;
+        }
+        const bk = list.find((b) => b.id === bookId) || {};
+        const lines = ['《' + (bk.title || '本书') + '》即时答疑', ''];
+        done.forEach((it, i) => {
+          lines.push(String(i + 1) + '. 问：' + it.q);
+          lines.push(it.a);
+          lines.push('');
+        });
+        const body = lines.join('\n');
+        try {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(body);
+          } else {
+            const ta = document.createElement('textarea');
+            ta.value = body;
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand('copy');
+            document.body.removeChild(ta);
+          }
+          setTip('已复制 ' + done.length + ' 条');
+        } catch {
+          setTip('复制没成功，允许剪贴板权限再试');
+        }
+        setTimeout(() => setTip(''), 2600);
+      }, [bookId, items, list]);
+
+      /** 导出真 PDF：交给后台用无头浏览器打印，存进「下载」文件夹并自动打开。 */
+      const exportPdf = useCallback(async () => {
+        const done = items.filter((it) => it.a);
+        if (!done.length) {
+          setTip('还没有问答可导出');
+          return;
+        }
+        const bk = list.find((b) => b.id === bookId) || {};
+        setTip('正在生成 PDF…');
+        try {
+          const r = await fetch(CONSULT_EXPORT_API, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              bookId: bookId,
+              bookTitle: bk.title || '本书',
+              items: done.map((it) => ({ q: it.q, a: it.a })),
+            }),
+          });
+          const data = await r.json();
+          if (!data || !data.ok) throw new Error((data && data.error) || '没导出来');
+          setTip('已存进「下载」文件夹并自动打开');
+        } catch (err) {
+          setTip('导出失败：' + ((err && err.message) || String(err)));
+        }
+        setTimeout(() => setTip(''), 7000);
+      }, [bookId, items, list]);
 
       const ask = useCallback(async () => {
         const q = text.trim();
@@ -1849,10 +1968,54 @@ window.__ModuleLoader__.load({
         }
       }, [bookId, busy, text]);
 
+      const hasQA = items.filter((it) => it.a).length > 0;
+      const qaBtn = {
+        flex: 'none',
+        padding: '4px 11px',
+        borderRadius: 8,
+        border: '1px solid ' + C.border,
+        background: 'transparent',
+        color: C.sub,
+        fontSize: 12,
+        cursor: hasQA ? 'pointer' : 'default',
+        opacity: hasQA ? 1 : 0.45,
+      };
       return h(
         'div',
-        { style: { display: 'flex', flexDirection: 'column', gap: 12 } },
-        h('div', { style: { fontSize: 15, fontWeight: 700 } }, '即时答疑'),
+        {
+          style: {
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 12,
+            flex: '1',
+            minHeight: 0,
+            boxSizing: 'border-box',
+          },
+        },
+        h(
+          'div',
+          {
+            style: {
+              flex: 'none',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+            },
+          },
+          h('div', { style: { fontSize: 15, fontWeight: 700, flex: 'none' } }, '即时答疑'),
+          h('div', { style: { flex: '1', minWidth: 4 } }),
+          tip ? h('div', { style: { fontSize: 12, color: C.sub, flex: 'none' } }, tip) : null,
+          h(
+            'button',
+            { type: 'button', onClick: copyAll, disabled: !hasQA, style: qaBtn },
+            '复制问答',
+          ),
+          h(
+            'button',
+            { type: 'button', onClick: exportPdf, disabled: !hasQA, style: qaBtn },
+            '导出 PDF',
+          ),
+        ),
         h(
           'div',
           { style: { fontSize: 12, color: C.sub, lineHeight: 1.75 } },
@@ -1880,7 +2043,7 @@ window.__ModuleLoader__.load({
                     key: b.id,
                     type: 'button',
                     title: b.title,
-                    onClick: () => setBookId(b.id),
+                    onClick: () => switchBook(b.id),
                     style: {
                       display: 'flex',
                       alignItems: 'center',
@@ -1931,9 +2094,68 @@ window.__ModuleLoader__.load({
               }),
             )
           : h('div', { style: { fontSize: 12, color: C.sub } }, '书架还空着，先去导入一本书。'),
+        items.length
+          ? h(
+              'div',
+              {
+                ref: listRef,
+                style: {
+                  flex: '1',
+                  minHeight: 0,
+                  overflowY: 'auto',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 10,
+                  marginTop: 2,
+                  paddingRight: 4,
+                },
+              },
+              items.map((it) =>
+                  h(
+                    'div',
+                    {
+                      key: it.seq,
+                      style: {
+                        padding: '10px 12px',
+                        borderRadius: 10,
+                        border: '1px solid ' + C.border,
+                        background: C.layer1,
+                      },
+                    },
+                    h(
+                      'div',
+                      { style: { fontSize: 13, fontWeight: 600, lineHeight: 1.6, color: C.text } },
+                      '你问：' + it.q,
+                    ),
+                    it.status === 'working' && !it.a
+                      ? h('div', { style: { fontSize: 12, color: C.sub, marginTop: 6 } }, '在想…')
+                      : null,
+                    it.a
+                      ? h(
+                          'div',
+                          {
+                            style: {
+                              fontSize: 13,
+                              lineHeight: 1.9,
+                              marginTop: 7,
+                              whiteSpace: 'pre-wrap',
+                              color: C.text,
+                              wordBreak: 'break-word',
+                            },
+                          },
+                          it.a,
+                        )
+                      : null,
+                    it.status === 'err'
+                      ? h('div', { style: { fontSize: 12, color: C.error, marginTop: 6, lineHeight: 1.7 } }, it.error)
+                      : null,
+                  ),
+                ),
+            )
+          : null,
         h(
           'div',
-          { style: { display: 'flex', gap: 8 } },
+          { style: { flex: 'none', display: 'flex', gap: 8, marginTop: 'auto' } },
           h('input', {
             value: text,
             placeholder: '想问什么？写完按回车',
@@ -1978,56 +2200,6 @@ window.__ModuleLoader__.load({
             busy ? '在想…' : '问',
           ),
         ),
-        items.length
-          ? h(
-              'div',
-              { style: { display: 'flex', flexDirection: 'column', gap: 10, marginTop: 2 } },
-              items
-                .slice()
-                .reverse()
-                .map((it) =>
-                  h(
-                    'div',
-                    {
-                      key: it.seq,
-                      style: {
-                        padding: '10px 12px',
-                        borderRadius: 10,
-                        border: '1px solid ' + C.border,
-                        background: C.layer1,
-                      },
-                    },
-                    h(
-                      'div',
-                      { style: { fontSize: 13, fontWeight: 600, lineHeight: 1.6, color: C.text } },
-                      '你问：' + it.q,
-                    ),
-                    it.status === 'working' && !it.a
-                      ? h('div', { style: { fontSize: 12, color: C.sub, marginTop: 6 } }, '在想…')
-                      : null,
-                    it.a
-                      ? h(
-                          'div',
-                          {
-                            style: {
-                              fontSize: 13,
-                              lineHeight: 1.9,
-                              marginTop: 7,
-                              whiteSpace: 'pre-wrap',
-                              color: C.text,
-                              wordBreak: 'break-word',
-                            },
-                          },
-                          it.a,
-                        )
-                      : null,
-                    it.status === 'err'
-                      ? h('div', { style: { fontSize: 12, color: C.error, marginTop: 6, lineHeight: 1.7 } }, it.error)
-                      : null,
-                  ),
-                ),
-            )
-          : null,
       );
     }
 
@@ -3400,7 +3572,16 @@ window.__ModuleLoader__.load({
           { style: { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' } },
         h(
           'div',
-          { style: { flex: 1, minHeight: 0, overflowY: nav === 'reading' ? 'hidden' : 'auto', padding: '56px 22px 24px' } },
+          {
+            style: {
+              flex: 1,
+              minHeight: 0,
+              overflowY: nav === 'reading' ? 'hidden' : 'auto',
+              padding: '56px 22px 24px',
+              display: nav === 'consult' ? 'flex' : 'block',
+              flexDirection: 'column',
+            },
+          },
           nav === 'settings' ? h(SettingsView, { voice, onSaved: setVoice, scale: scale, onScale: changeScale }) : null,
           (nav !== 'shelf' && nav !== 'reading') || imp.kind === 'idle'
             ? null

@@ -16,6 +16,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { execFile } from 'node:child_process';
 import { IMPORTABLE_EXTS, importBook, newBookId } from './borrower.js';
 import {
   EMOTIONS,
@@ -41,12 +42,14 @@ export const ROUTE_PROBE = '/dsh-book-library/voice/probe';
 export const ROUTE_LECTURE = '/dsh-book-library/lecture';
 export const ROUTE_ASK = '/dsh-book-library/ask';
 export const ROUTE_CONSULT = '/dsh-book-library/consult';
+export const ROUTE_CONSULT_HISTORY = '/dsh-book-library/consult/history';
+export const ROUTE_CONSULT_EXPORT = '/dsh-book-library/consult/export';
 export const ROUTE_RENAME = '/dsh-book-library/rename';
 export const ROUTE_DELETE = '/dsh-book-library/delete';
 export const ROUTE_PREFERENCE = '/dsh-book-library/preference';
 export const ROUTE_EXPORT = '/dsh-book-library/export';
 
-const PLUGIN_VERSION = '1.28.5';
+const PLUGIN_VERSION = '1.28.8';
 
 /** 上传体积上限：200 MB。一本电子书远到不了这么大，超了直接拒。 */
 const MAX_UPLOAD_BYTES = 200 * 1024 * 1024;
@@ -966,9 +969,172 @@ async function handleAsk(req, res) {
     res.end();
     return;
   }
+  if (bookId) saveConsultEntry(bookId, question, text);
   emit(res, { type: 'done', text: text.trim(), chars: text.trim().length });
   res.end();
 }
+/* ---------- 答疑留档 ---------- */
+
+/** 每本书的问答各存一份，换书翻回自己那本的历史。 */
+const CONSULT_DIR = path.join(BOOKS_ROOT, 'consult');
+
+function consultFileOf(bookId) {
+  const raw = String(bookId || '').trim();
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(raw)) return '';
+  return path.join(CONSULT_DIR, raw + '.json');
+}
+
+function loadConsultHistory(bookId) {
+  const file = consultFileOf(bookId);
+  if (!file || !fs.existsSync(file)) return [];
+  try {
+    const got = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return Array.isArray(got) ? got : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveConsultEntry(bookId, question, answer) {
+  const file = consultFileOf(bookId);
+  if (!file) return;
+  const one = String(answer || '').trim();
+  if (!one) return;
+  try {
+    fs.mkdirSync(CONSULT_DIR, { recursive: true });
+    let list = loadConsultHistory(bookId);
+    list.push({ q: String(question || '').slice(0, 2000), a: one, at: new Date().toISOString() });
+    if (list.length > 200) list = list.slice(list.length - 200);
+    fs.writeFileSync(file, JSON.stringify(list, null, 2) + '\n', 'utf8');
+  } catch {
+    /* 存不下也不影响这次回答 */
+  }
+}
+
+async function handleConsultHistory(req, res) {
+  const url = new URL(req.url || '/', 'http://127.0.0.1');
+  const bookId = String(url.searchParams.get('bookId') || '');
+  const items = loadConsultHistory(bookId).map((it) => ({ q: it.q, a: it.a, at: it.at }));
+  sendJson(res, 200, { ok: true, items });
+}
+
+/** 能直接把网页打印成 PDF 的浏览器（macOS 常见位置，按顺序探）。 */
+const CONSULT_PDF_BROWSERS = [
+  '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  '/Applications/Chromium.app/Contents/MacOS/Chromium',
+  '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser',
+];
+
+function pdfBrowserPath() {
+  for (const one of CONSULT_PDF_BROWSERS) {
+    try {
+      if (fs.existsSync(one)) return one;
+    } catch {
+      /* 探不到就试下一个 */
+    }
+  }
+  return '';
+}
+
+/** 把问答拼成一份 A4 打印页。 */
+function consultPrintHtml(bookTitle, pairs) {
+  const rows = pairs
+    .map(
+      (p, i) =>
+        '<section class="qa"><h2>' +
+        (i + 1) +
+        '. 问：' +
+        esc(p.q) +
+        '</h2><div class="a">' +
+        esc(p.a).replace(/\n/g, '<br/>') +
+        '</div></section>',
+    )
+    .join('');
+  return (
+    '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><style>' +
+    '@page{size:A4;margin:18mm 16mm}' +
+    'body{margin:0;color:#1a1a1a;font-family:"Kaiti SC","楷体-简","STKaiti",serif;font-size:12pt;line-height:1.95}' +
+    'h1{font-size:18pt;margin:0 0 4pt}' +
+    '.meta{color:#666;font-size:9.5pt;margin:0 0 16pt;padding-bottom:8pt;border-bottom:1px solid #ddd}' +
+    'h2{font-size:12.5pt;margin:0 0 6pt;font-weight:600}' +
+    '.qa{margin:0 0 15pt;padding-bottom:11pt;border-bottom:1px dashed #e2e2e2;page-break-inside:avoid}' +
+    '.a{word-break:break-word}' +
+    '</style></head><body><h1>《' +
+    esc(bookTitle) +
+    '》即时答疑</h1><div class="meta">共 ' +
+    pairs.length +
+    ' 条 · ' +
+    new Date().toLocaleString('zh-CN') +
+    '</div>' +
+    rows +
+    '</body></html>'
+  );
+}
+
+/**
+ * 答疑导出真 PDF：先把问答拼成打印页，再用无头浏览器直接打印成 PDF，
+ * 落到下载文件夹并打开。不上传、不花钱、不依赖前端弹窗。
+ */
+async function handleConsultExport(req, res) {
+  const body = await readJsonBody(req);
+  const bookTitle = String((body && body.bookTitle) || '本书').trim() || '本书';
+  const list = Array.isArray(body && body.items) ? body.items : [];
+  const pairs = list
+    .map((it) => ({ q: String((it && it.q) || '').trim(), a: String((it && it.a) || '').trim() }))
+    .filter((p) => p.q && p.a);
+  if (!pairs.length) {
+    sendJson(res, 200, { ok: false, error: '这本书还没有问答，没东西可导出。' });
+    return;
+  }
+  const browser = pdfBrowserPath();
+  if (!browser) {
+    sendJson(res, 200, { ok: false, error: '本机没找到能把网页存成 PDF 的浏览器，导不出来。' });
+    return;
+  }
+  const d = new Date();
+  const two = (n) => String(n).padStart(2, '0');
+  const stamp =
+    '' + d.getFullYear() + two(d.getMonth() + 1) + two(d.getDate()) + '-' + two(d.getHours()) + two(d.getMinutes());
+  const safeTitle = String(bookTitle).replace(/[\\/:*?"<>|]/g, '-').slice(0, 40) || '书';
+  const outDir = path.join(os.homedir(), 'Downloads');
+  const outPath = path.join(outDir, safeTitle + '-即时答疑-' + stamp + '.pdf');
+  const tmpHtml = path.join(os.tmpdir(), 'dsh-consult-' + Date.now() + '.html');
+  try {
+    fs.mkdirSync(outDir, { recursive: true });
+    fs.writeFileSync(tmpHtml, consultPrintHtml(bookTitle, pairs), 'utf8');
+    await new Promise((resolve, reject) => {
+      execFile(
+        browser,
+        [
+          '--headless=new',
+          '--disable-gpu',
+          '--no-pdf-header-footer',
+          '--print-to-pdf=' + outPath,
+          'file://' + tmpHtml,
+        ],
+        { timeout: 90000 },
+        (err) => (err ? reject(err) : resolve()),
+      );
+    });
+    if (!fs.existsSync(outPath)) throw new Error('PDF 没生成出来');
+    try {
+      execFile('open', [outPath], () => {});
+    } catch {
+      /* 打不开也不影响文件已经存好 */
+    }
+    sendJson(res, 200, { ok: true, file: outPath, name: path.basename(outPath), count: pairs.length });
+  } catch (err) {
+    sendJson(res, 200, { ok: false, error: '转 PDF 失败：' + ((err && err.message) || String(err)) });
+  } finally {
+    try {
+      fs.unlinkSync(tmpHtml);
+    } catch {
+      /* 临时文件清不掉就算了 */
+    }
+  }
+}
+
 /**
  * 即时答疑：不绑章节，拿书名 + 章节目录 + 已听过的讲解摘要当背景回答。
  * 没指定书就纯聊天式地答，不当查书机器。
@@ -1508,6 +1674,22 @@ export function apply(ctx) {
           handler: guard((req, res) => handleExport(req, res)),
         }),
       ),
+    );
+
+    offs.push(
+      scoped.webServer.register({
+        kind: 'exact',
+        path: ROUTE_CONSULT_HISTORY,
+        handler: guard((req, res) => handleConsultHistory(req, res)),
+      }),
+    );
+
+    offs.push(
+      scoped.webServer.register({
+        kind: 'exact',
+        path: ROUTE_CONSULT_EXPORT,
+        handler: guard((req, res) => handleConsultExport(req, res)),
+      }),
     );
 
     ctx.on('dispose', () => {
